@@ -526,7 +526,7 @@ class SeleniumTestEngine:
                     except StaleElementReferenceException:
                         if attempt < max_retries - 1:
                             # 重新定位元素
-                            logger.warning(f"⚠️ 元素过期（Stale Element），正在重试... (尝试 {attempt + 2}/{max_retries})")
+                            logger.warning(f"[WARNING] 元素过期（Stale Element），正在重试... (尝试 {attempt + 2}/{max_retries})")
                             # 增加等待时间，让页面 DOM 稳定（对于 Vue/React 应用很重要）
                             wait_time = 1.0 if attempt == 0 else 1.5  # 第一次重试等1秒，第二次重试等1.5秒
                             logger.info(f"等待 {wait_time}秒 让页面稳定...")
@@ -546,7 +546,7 @@ class SeleniumTestEngine:
 
                             # 等待元素状态稳定（确保 DOM 不再变化）
                             time.sleep(0.3)
-                            logger.info(f"✓ 元素重新定位成功: '{element_name}'")
+                            logger.info(f"[OK] 元素重新定位成功: '{element_name}'")
                         else:
                             raise
                     except Exception as click_error:
@@ -615,14 +615,14 @@ class SeleniumTestEngine:
                         return True, log, None
                     except StaleElementReferenceException:
                         if attempt < max_retries - 1:
-                            logger.warning(f"⚠️ 元素过期（Stale Element），正在重试... (尝试 {attempt + 2}/{max_retries})")
+                            logger.warning(f"[WARNING] 元素过期（Stale Element），正在重试... (尝试 {attempt + 2}/{max_retries})")
                             # 增加等待时间，让页面 DOM 稳定
                             wait_time = 1.0 if attempt == 0 else 1.5
                             logger.info(f"等待 {wait_time}秒 让页面稳定...")
                             time.sleep(wait_time)
                             element = wait.until(EC.presence_of_element_located((by_type, by_value)))
                             time.sleep(0.3)  # 确保元素状态稳定
-                            logger.info(f"✓ 元素重新定位成功")
+                            logger.info(f"[OK] 元素重新定位成功")
                         else:
                             raise
 
@@ -641,14 +641,14 @@ class SeleniumTestEngine:
                         return True, log, None
                     except StaleElementReferenceException:
                         if attempt < max_retries - 1:
-                            logger.warning(f"⚠️ 元素过期（Stale Element），正在重试... (尝试 {attempt + 2}/{max_retries})")
+                            logger.warning(f"[WARNING] 元素过期（Stale Element），正在重试... (尝试 {attempt + 2}/{max_retries})")
                             # 增加等待时间，让页面 DOM 稳定
                             wait_time = 1.0 if attempt == 0 else 1.5
                             logger.info(f"等待 {wait_time}秒 让页面稳定...")
                             time.sleep(wait_time)
                             element = wait.until(EC.presence_of_element_located((by_type, by_value)))
                             time.sleep(0.3)  # 确保元素状态稳定
-                            logger.info(f"✓ 元素重新定位成功")
+                            logger.info(f"[OK] 元素重新定位成功")
                         else:
                             raise
 
@@ -945,10 +945,10 @@ class SeleniumTestEngine:
                 # 如果还是没有，使用默认信息
                 if not error_msg:
                     error_msg = f"未知错误 (异常类型: {error_type})"
-                    print(f"⚠️ 无法提取任何有用信息，使用默认错误消息")
+                    print(f"[WARNING] 无法提取任何有用信息，使用默认错误消息")
 
             except Exception as extract_error:
-                print(f"⚠️ 提取错误信息时出错: {extract_error}")
+                print(f"[WARNING] 提取错误信息时出错: {extract_error}")
                 error_msg = f"无法提取详细错误信息 (异常类型: {error_type})"
 
             # 添加异常类型前缀（如果还没有）

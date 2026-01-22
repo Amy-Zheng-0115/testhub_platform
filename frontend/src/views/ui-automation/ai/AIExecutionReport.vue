@@ -238,7 +238,25 @@
     <!-- GIF回放对话框 -->
     <el-dialog v-model="showGifDialog" title="GIF回放" width="800px" append-to-body>
       <div v-if="reportData && reportData.gif_path" class="gif-container">
-        <img :src="gifUrl" alt="Execution GIF" class="gif-image" />
+        <div v-if="gifLoading" class="gif-loading">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>加载中...</span>
+        </div>
+        <img 
+          v-show="!gifLoading && !gifError"
+          :src="gifUrl" 
+          alt="Execution GIF" 
+          class="gif-image"
+          @load="gifLoading = false"
+          @error="handleGifError"
+        />
+        <div v-if="gifError" class="gif-error">
+          <el-empty description="GIF加载失败" />
+          <el-button type="primary" @click="retryLoadGif">重试</el-button>
+        </div>
+      </div>
+      <div v-else class="gif-empty">
+        <el-empty description="暂无GIF回放" />
       </div>
     </el-dialog>
   </el-dialog>
@@ -269,6 +287,8 @@ const loading = ref(false)
 const reportData = ref(null)
 const currentReportType = ref('summary')
 const showGifDialog = ref(false)
+const gifLoading = ref(false)
+const gifError = ref(false)
 const pieChartRef = ref(null)
 const barChartRef = ref(null)
 let pieChart = null
@@ -288,7 +308,9 @@ const reportTypeDisplay = computed(() => {
 const gifUrl = computed(() => {
   if (reportData.value && reportData.value.gif_path) {
     // gif_path格式：media/ai_recording/xxx.gif
-    const path = reportData.value.gif_path
+    // 处理可能的Windows路径（反斜杠）或Unix路径（正斜杠）
+    let path = reportData.value.gif_path.replace(/\\/g, '/')
+    
     // 如果路径已经包含media/，直接使用；否则添加media/
     if (path.startsWith('media/')) {
       return `/${path}`
@@ -323,6 +345,35 @@ watch(visible, (newVal) => {
     }
   }
 })
+
+// 监听 GIF 对话框显示，重置加载状态
+watch(showGifDialog, (newVal) => {
+  if (newVal) {
+    gifLoading.value = true
+    gifError.value = false
+  }
+})
+
+// GIF 加载错误处理
+const handleGifError = () => {
+  gifLoading.value = false
+  gifError.value = true
+  console.error('GIF加载失败，URL:', gifUrl.value)
+  ElMessage.error('GIF回放加载失败，请检查文件是否存在')
+}
+
+// 重试加载 GIF
+const retryLoadGif = () => {
+  gifLoading.value = true
+  gifError.value = false
+  // 通过修改key强制刷新图片
+  setTimeout(() => {
+    const img = document.querySelector('.gif-image')
+    if (img) {
+      img.src = gifUrl.value + '?t=' + Date.now()
+    }
+  }, 100)
+}
 
 // 加载报告数据
 const loadReport = async (reportType = 'summary') => {
@@ -800,5 +851,41 @@ const handleClose = () => {
 
 .report-container::-webkit-scrollbar-thumb:hover {
   background: #C0C4CC;
+}
+
+.gif-container {
+  text-align: center;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+
+.gif-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 40px;
+}
+
+.gif-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding: 40px;
+}
+
+.gif-empty {
+  padding: 40px;
+}
+
+.gif-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 </style>

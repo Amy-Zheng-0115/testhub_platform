@@ -1041,6 +1041,7 @@ class AIExecutionRecord(models.Model):
     end_time = models.DateTimeField(null=True, blank=True, verbose_name='结束时间')
     duration = models.FloatField(null=True, blank=True, verbose_name='执行时长(秒)')
     logs = models.TextField(blank=True, default='', verbose_name='执行日志')
+    error_message = models.TextField(blank=True, default='', verbose_name='错误信息')
     steps_completed = models.JSONField(default=list, verbose_name='已完成步骤')
     planned_tasks = models.JSONField(default=list, verbose_name='规划任务') # 规划的任务列表 [{'id': 1, 'description': '...', 'status': 'pending'}]
     executed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name='执行人')

@@ -240,24 +240,36 @@ class TestExecutor:
 
                 # 为每个测试用例启动新的浏览器实例
                 try:
-                    # 选择浏览器
+                    # 选择浏览器并配置忽略证书错误
                     if self.browser == 'firefox':
-                        browser = p.firefox.launch(headless=self.headless)
+                        browser = p.firefox.launch(
+                            headless=self.headless,
+                            args=['--ignore-certificate-errors']
+                        )
                     elif self.browser == 'safari':
-                        browser = p.webkit.launch(headless=self.headless)
+                        browser = p.webkit.launch(
+                            headless=self.headless,
+                            args=['--ignore-certificate-errors']
+                        )
                     else:  # chrome or edge
-                        # 添加防检测参数
+                        # 添加防检测参数和忽略证书错误
                         browser = p.chromium.launch(
                             headless=self.headless,
-                            args=['--disable-blink-features=AutomationControlled']
+                            args=[
+                                '--disable-blink-features=AutomationControlled',
+                                '--ignore-certificate-errors',
+                                '--ignore-ssl-errors',
+                                '--ignore-certificate-errors-spki-list',
+                            ]
                         )
 
                     print(f"✓ 浏览器已启动")
 
-                    # 配置上下文（User Agent 和 Viewport）
+                    # 配置上下文（User Agent 和 Viewport，忽略HTTPS证书错误）
                     self.context = browser.new_context(
                         viewport={'width': 1920, 'height': 1080},
-                        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+                        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                        ignore_https_errors=True  # 忽略 HTTPS 证书错误
                     )
                     self.current_page = self.context.new_page()
 
@@ -599,6 +611,7 @@ class TestExecutor:
                 element_name = element.get('name', '未知元素')
 
                 # 根据定位策略构造 Playwright 选择器
+                locator = None
                 if locator_strategy in ['css', 'css selector']:
                     selector = locator_value
                 elif locator_strategy == 'xpath':
@@ -608,9 +621,34 @@ class TestExecutor:
                 elif locator_strategy == 'name':
                     selector = f'[name="{locator_value}"]'
                 elif locator_strategy == 'text':
-                    selector = f'text={locator_value}'
+                    # 使用 Playwright 的 get_by_text 方法
+                    locator = self.current_page.get_by_text(locator_value, exact=False)
+                    selector = None  # 不使用字符串选择器
+                elif locator_strategy == 'placeholder':
+                    # 使用 Playwright 的 get_by_placeholder 方法
+                    locator = self.current_page.get_by_placeholder(locator_value)
+                    selector = None
+                elif locator_strategy == 'role':
+                    # 使用 Playwright 的 get_by_role 方法
+                    locator = self.current_page.get_by_role(locator_value)
+                    selector = None
+                elif locator_strategy == 'label':
+                    # 使用 Playwright 的 get_by_label 方法
+                    locator = self.current_page.get_by_label(locator_value)
+                    selector = None
+                elif locator_strategy == 'title':
+                    # 使用 Playwright 的 get_by_title 方法
+                    locator = self.current_page.get_by_title(locator_value)
+                    selector = None
+                elif locator_strategy == 'test-id':
+                    # 使用 Playwright 的 get_by_test_id 方法
+                    locator = self.current_page.get_by_test_id(locator_value)
+                    selector = None
                 else:
                     selector = locator_value
+                
+                # 统一使用 locator 对象（如果有），否则使用 selector 字符串
+                element_locator = locator if locator is not None else (self.current_page.locator(selector) if selector else None)
 
                 # 根据操作类型执行动作
                 if step_data['action_type'] == 'click':
@@ -770,31 +808,35 @@ class TestExecutor:
                             
                             # 先尝试滚动到元素（确保元素在视口内）
                             try:
-                                self.current_page.locator(selector).scroll_into_view_if_needed(timeout=5000)
+                                element_locator.scroll_into_view_if_needed(timeout=5000)
                                 print(f"  ✓ 元素已滚动到视口")
                             except Exception as e:
                                 print(f"  ⚠️  滚动失败: {str(e)[:50]}")
                             
                             # 使用更长的超时时间（至少10秒）
                             extended_timeout = max(step_data['wait_time'], 10000)
-                            self.current_page.click(selector, timeout=extended_timeout)
+                            element_locator.click(timeout=extended_timeout)
                             print(f"  ✓ 点击成功（超时: {extended_timeout}ms）")
                         else:
-                            self.current_page.click(selector, timeout=step_data['wait_time'])
+                            element_locator.click(timeout=step_data['wait_time'])
                         step_result['success'] = True
 
                 elif step_data['action_type'] == 'fill':
                     # 解析输入值中的变量表达式
                     resolved_value = resolve_variables(step_data['input_value'])
                     
+                    # 等待元素可见（对于新定位方式很重要）
+                    if locator is not None:
+                        element_locator.wait_for(state='visible', timeout=step_data['wait_time'])
+                    
                     # 如果刚切换了标签页，增加超时时间
                     if step_data.get('_just_switched_tab'):
                         # 确保页面保持在前台
                         self.current_page.bring_to_front()
                         extended_timeout = max(step_data['wait_time'], 10000)
-                        self.current_page.fill(selector, resolved_value, timeout=extended_timeout)
+                        element_locator.fill(resolved_value, timeout=extended_timeout)
                     else:
-                        self.current_page.fill(selector, resolved_value, timeout=step_data['wait_time'])
+                        element_locator.fill(resolved_value, timeout=step_data['wait_time'])
                     
                     step_result['success'] = True
                     # 记录解析后的值（用于调试）
@@ -804,7 +846,7 @@ class TestExecutor:
 
 
                 elif step_data['action_type'] == 'getText':
-                    text = self.current_page.text_content(selector, timeout=step_data['wait_time'])
+                    text = element_locator.text_content(timeout=step_data['wait_time'])
                     step_result['result'] = text
                     step_result['success'] = True
 
@@ -819,19 +861,19 @@ class TestExecutor:
                     
                     if is_dropdown_option_wait:
                         # 对于下拉框选项，只等待元素在DOM中（attached），不要求可见
-                        self.current_page.wait_for_selector(selector, state='attached', timeout=step_data['wait_time'])
+                        element_locator.wait_for(state='attached', timeout=step_data['wait_time'])
                     else:
                         # 普通元素：等待可见
-                        self.current_page.wait_for_selector(selector, timeout=step_data['wait_time'])
+                        element_locator.wait_for(state='visible', timeout=step_data['wait_time'])
                     
                     step_result['success'] = True
 
                 elif step_data['action_type'] == 'hover':
-                    self.current_page.hover(selector, timeout=step_data['wait_time'])
+                    element_locator.hover(timeout=step_data['wait_time'])
                     step_result['success'] = True
 
                 elif step_data['action_type'] == 'scroll':
-                    self.current_page.locator(selector).scroll_into_view_if_needed()
+                    element_locator.scroll_into_view_if_needed()
                     step_result['success'] = True
 
                 elif step_data['action_type'] == 'screenshot':
@@ -848,7 +890,7 @@ class TestExecutor:
 
                     # 执行断言
                     if step_data['assert_type'] == 'textContains':
-                        text = self.current_page.text_content(selector, timeout=step_data['wait_time'])
+                        text = element_locator.text_content(timeout=step_data['wait_time'])
                         if resolved_assert_value in text:
                             step_result['success'] = True
                         else:
@@ -857,7 +899,7 @@ class TestExecutor:
                             log += f"  - 实际文本: '{text}'"
                             step_result['error'] = log
                     elif step_data['assert_type'] == 'textEquals':
-                        text = self.current_page.text_content(selector, timeout=step_data['wait_time'])
+                        text = element_locator.text_content(timeout=step_data['wait_time'])
                         if text == resolved_assert_value:
                             step_result['success'] = True
                         else:
@@ -867,12 +909,12 @@ class TestExecutor:
                             log += f"  - 实际: '{text}'"
                             step_result['error'] = log
                     elif step_data['assert_type'] == 'isVisible':
-                        is_visible = self.current_page.is_visible(selector)
+                        is_visible = element_locator.is_visible(timeout=step_data['wait_time'])
                         step_result['success'] = is_visible
                         if not is_visible:
                             step_result['error'] = f"✗ 断言失败: 元素 '{element_name}' 不可见"
                     elif step_data['assert_type'] == 'exists':
-                        count = self.current_page.locator(selector).count()
+                        count = element_locator.count()
                         step_result['success'] = count > 0
                         if count == 0:
                             step_result['error'] = f"✗ 断言失败: 元素 '{element_name}' 不存在"

@@ -74,21 +74,21 @@ class AIReportPDFGenerator:
                     try:
                         pdfmetrics.registerFont(TTFont('ChineseFont', font_path))
                         font_registered = True
-                        logger.info(f"✅ Registered Chinese font: {font_path}")
+                        logger.info(f"[OK] Registered Chinese font: {font_path}")
                         break
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to register font {font_path}: {e}")
+                        logger.warning(f"[WARNING] Failed to register font {font_path}: {e}")
                         continue
 
             if not font_registered:
-                logger.warning("⚠️ No Chinese font found, PDF may not display Chinese correctly")
+                logger.warning("[WARNING] No Chinese font found, PDF may not display Chinese correctly")
                 # 使用Helvetica作为备用
                 self.font_name = 'Helvetica'
             else:
                 self.font_name = 'ChineseFont'
 
         except Exception as e:
-            logger.error(f"❌ Error registering fonts: {e}")
+            logger.error(f"[ERROR] Error registering fonts: {e}")
             self.font_name = 'Helvetica'
 
     def _create_styles(self):

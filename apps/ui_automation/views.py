@@ -2878,12 +2878,17 @@ class AICaseViewSet(viewsets.ModelViewSet):
         """执行 AI 用例"""
         ai_case = self.get_object()
 
+        # 从请求中获取执行模式和GIF开关
+        execution_mode = request.data.get('execution_mode', 'text')  # 默认文本模式
+        enable_gif = request.data.get('enable_gif', True)  # GIF录制开关，默认开启
+        
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
             project=ai_case.project,
             ai_case=ai_case,
             case_name=ai_case.name,
             task_description=ai_case.task_description,
+            execution_mode=execution_mode,  # 记录执行模式
             status='running',
             executed_by=request.user,
             logs="正在分析任务...\n"
@@ -2906,7 +2911,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_record.planned_tasks = planned_tasks
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(execution_record.save)()
-                    
+
                 async def on_step_update(step_info):
                     try:
                         # 处理日志
@@ -2932,21 +2937,167 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     except Exception as e:
                         print(f"更新步骤状态失败: {e}")
 
-                history = run_full_process_sync(
-                    ai_case.task_description, 
-                    analysis_callback=on_analysis_complete, 
-                    step_callback=on_step_update,
-                    should_stop=should_stop
-                )
+                try:
+                    # 使用外层作用域的execution_mode和enable_gif变量
+                    history = run_full_process_sync(
+                        ai_case.task_description, 
+                        analysis_callback=on_analysis_complete, 
+                        step_callback=on_step_update,
+                        should_stop=should_stop,
+                        execution_mode=execution_mode,
+                        enable_gif=enable_gif,
+                        case_name=ai_case.name  # 传递用例名称用于GIF文件命名
+                    )
+                except KeyboardInterrupt as ki:
+                    # KeyboardInterrupt 通常表示任务正常完成或被停止
+                    error_msg = str(ki)
+                    if "All tasks completed" in error_msg:
+                        # 任务正常完成，尝试获取history（可能在异常前已经返回）
+                        execution_record.logs += "\n[System] 所有任务已完成，正常结束。"
+                        # 不设置 history = None，尝试使用已有的 history
+                        # 如果确实没有 history，后续逻辑会根据 planned_tasks 状态判断
+                    elif "User requested stop" in error_msg or "Done" in error_msg:
+                        execution_record.status = 'stopped'
+                        execution_record.logs += "\n[System] 任务已由用户停止。"
+                        execution_record.end_time = timezone.now()
+                        execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
+                        execution_record.save()
+                        return
+                    else:
+                        # 其他 KeyboardInterrupt，可能表示正常终止
+                        execution_record.logs += f"\n[System] 任务被中断: {error_msg}"
+                        history = None
+                except Exception as e:
+                    error_message = str(e)
+                    # 检查是否是浏览器启动相关的错误，这些可能是临时错误
+                    is_browser_error = any(keyword in error_message.lower() for keyword in [
+                        'jsondecodeerror', 'expecting value', 'cdp', 'browser start', 
+                        'connection refused', 'timeout', 'browser may not be ready'
+                    ])
+                    
+                    if is_browser_error:
+                        # 浏览器启动错误，可能是临时问题，等待一下看看是否有部分执行结果
+                        logger.warning(f"[WARNING] Browser-related error detected: {error_message}")
+                        execution_record.logs += f"\n[WARNING] 浏览器启动错误（可能是临时问题）: {error_message}"
+                        execution_record.logs += "\n[INFO] 等待检查是否有部分执行结果..."
+                        # 继续执行，检查 history 是否为空
+                        history = None
+                    else:
+                        # 其他错误，直接抛出
+                        raise
                 
                 # 检查是否是手动停止
                 if should_stop():
                     execution_record.status = 'stopped'
                     execution_record.logs += "\n[System] 任务已由用户停止。"
+                elif history is None:
+                    # 没有有效的 history，检查 planned_tasks 状态来判断任务是否成功
+                    if execution_record.planned_tasks:
+                        total_tasks = len(execution_record.planned_tasks)
+                        completed_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+                        pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
+                        
+                        # 如果所有任务都完成了，标记为成功
+                        if completed_tasks == total_tasks and total_tasks > 0:
+                            execution_record.status = 'passed'
+                            execution_record.logs += "\n[System] 所有任务已完成（无history但任务状态为完成）。"
+                            logger.info(f"[INFO] All {total_tasks} tasks completed, marking as passed")
+                        elif completed_tasks > 0:
+                            # 有部分任务完成，但不完整，标记为失败
+                            execution_record.status = 'failed'
+                            execution_record.error_message = execution_record.error_message or f"部分任务完成（{completed_tasks}/{total_tasks}），任务未完整执行"
+                            execution_record.logs += f"\n[System] 部分任务完成（{completed_tasks}/{total_tasks}），任务未完整执行。"
+                            logger.warning(f"[WARNING] Partial task completion ({completed_tasks}/{total_tasks}), marking as failed")
+                        else:
+                            # 没有任务完成，标记为失败
+                            execution_record.status = 'failed'
+                            execution_record.error_message = execution_record.error_message or "任务执行异常终止"
+                            execution_record.logs += "\n执行异常终止（可能是浏览器启动失败或系统错误）。"
+                            logger.warning(f"[WARNING] Task execution terminated without history and no completed tasks")
+                    else:
+                        # 没有 planned_tasks 信息，标记为失败
+                        execution_record.status = 'failed'
+                        execution_record.error_message = execution_record.error_message or "任务执行异常终止"
+                        execution_record.logs += "\n执行异常终止（可能是浏览器启动失败或系统错误）。"
+                        logger.warning(f"[WARNING] Task execution terminated without history")
                 else:
-                    # 更新成功状态
-                    execution_record.status = 'passed'
-                    execution_record.logs += "\n执行完成。"
+                    # 格式化 history 为日志，并检查是否有失败的步骤
+                    steps = []
+                    has_failed_step = False
+                    failed_step_info = None
+                    
+                    if history:
+                        if hasattr(history, 'steps') and history.steps:
+                            for i, s in enumerate(history.steps):
+                                step_info = extract_step_info(s, i)
+                                
+                                # 检查步骤是否有错误
+                                if hasattr(s, 'error') and s.error:
+                                    step_info['success'] = False
+                                    step_info['error'] = str(s.error)
+                                    has_failed_step = True
+                                    if not failed_step_info:
+                                        failed_step_info = f"步骤 {i+1} 执行失败: {str(s.error)}"
+                                elif hasattr(s, 'result') and hasattr(s.result, 'error') and s.result.error:
+                                    step_info['success'] = False
+                                    step_info['error'] = str(s.result.error)
+                                    has_failed_step = True
+                                    if not failed_step_info:
+                                        failed_step_info = f"步骤 {i+1} 执行失败: {str(s.result.error)}"
+                                else:
+                                    step_info['success'] = True
+                                
+                                steps.append(step_info)
+                        
+                        # 检查 history 本身是否有错误
+                        if hasattr(history, 'error') and history.error:
+                            has_failed_step = True
+                            failed_step_info = str(history.error)
+
+                    execution_record.steps_completed = steps
+                    
+                    # 根据步骤执行结果更新状态
+                    if has_failed_step:
+                        execution_record.status = 'failed'
+                        execution_record.error_message = failed_step_info or "执行过程中有步骤失败"
+                        execution_record.logs += f"\n执行失败: {execution_record.error_message}"
+                        logger.warning(f"[WARNING] AI任务执行失败: {execution_record.error_message}")
+                    elif steps:
+                        # 有步骤且没有失败，标记为成功
+                        execution_record.status = 'passed'
+                        execution_record.logs += "\n执行完成。"
+                    else:
+                        # 没有步骤，检查 planned_tasks 状态来判断是否成功
+                        if execution_record.planned_tasks:
+                            total_tasks = len(execution_record.planned_tasks)
+                            completed_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+                            
+                            # 如果所有任务都完成了，即使没有steps也标记为成功
+                            if completed_tasks == total_tasks and total_tasks > 0:
+                                execution_record.status = 'passed'
+                                execution_record.logs += "\n[System] 所有任务已完成（无步骤记录但任务状态为完成）。"
+                                logger.info(f"[INFO] All {total_tasks} tasks completed (no steps but tasks marked as completed)")
+                            elif completed_tasks > 0:
+                                # 有部分任务完成，检查是否有错误信息
+                                if not execution_record.error_message:
+                                    execution_record.status = 'passed'  # 部分完成也算成功
+                                    execution_record.logs += f"\n[System] {completed_tasks}/{total_tasks} 任务已完成。"
+                                    logger.info(f"[INFO] {completed_tasks}/{total_tasks} tasks completed, marking as passed")
+                                else:
+                                    # 有错误信息，标记为失败
+                                    execution_record.status = 'failed'
+                                    execution_record.logs += "\n执行异常终止。"
+                            elif not execution_record.error_message:
+                                # 没有任务完成且没有错误信息，标记为失败
+                                execution_record.status = 'failed'
+                                execution_record.error_message = "任务执行异常，未生成执行步骤"
+                                execution_record.logs += "\n执行异常：未生成执行步骤。"
+                            # 如果有错误信息，状态已经在前面设置为 failed，不需要重复设置
+                        elif not execution_record.error_message:
+                            # 没有 planned_tasks 且没有错误信息，标记为失败
+                            execution_record.status = 'failed'
+                            execution_record.error_message = "任务执行异常，未生成执行步骤"
+                            execution_record.logs += "\n执行异常：未生成执行步骤。"
 
                     # 记录任务完成统计信息
                     if execution_record.planned_tasks:
@@ -2957,14 +3108,6 @@ class AICaseViewSet(viewsets.ModelViewSet):
                 
                 execution_record.end_time = timezone.now()
                 execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                
-                # 格式化 history 为日志 (如果不是停止状态)
-                steps = []
-                if history:
-                    if hasattr(history, 'steps'):
-                        steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
-
-                execution_record.steps_completed = steps
 
                 # 自动标记已完成的任务
                 if execution_record.planned_tasks:
@@ -2976,11 +3119,25 @@ class AICaseViewSet(viewsets.ModelViewSet):
                 execution_record.save()
 
             except Exception as e:
-                execution_record.status = 'failed'
-                execution_record.end_time = timezone.now()
-                execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                execution_record.logs += f"\n执行出错: {str(e)}"
-                execution_record.save()
+                # 最终异常处理：只有在没有设置状态的情况下才设置为失败
+                if execution_record.status == 'running':
+                    execution_record.status = 'failed'
+                    execution_record.end_time = timezone.now()
+                    execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
+                    error_message = str(e)
+                    
+                    # 检查是否是账户余额不足错误
+                    if 'balance' in error_message.lower() or 'insufficient' in error_message.lower() or '余额不足' in error_message or '30001' in error_message:
+                        execution_record.error_message = "API账户余额不足，请充值后重试"
+                        execution_record.logs += f"\n[ERROR] {execution_record.error_message}\n详细错误: {error_message}"
+                    else:
+                        execution_record.error_message = error_message
+                        execution_record.logs += f"\n执行出错: {error_message}"
+                    
+                    execution_record.save()
+                else:
+                    # 状态已经被设置，只记录错误日志
+                    logger.error(f"[ERROR] Task execution error (status already set to {execution_record.status}): {e}")
             finally:
                 # 清理停止信号
                 if execution_record.id in STOP_SIGNALS:
@@ -3026,15 +3183,15 @@ class AICaseViewSet(viewsets.ModelViewSet):
                 # 移动并重命名文件
                 shutil.move(default_gif_path, new_gif_path)
 
-                # 保存相对路径到数据库
-                relative_path = os.path.join('media', 'ai_recording', new_gif_filename)
+                # 保存相对路径到数据库（使用正斜杠，确保URL兼容）
+                relative_path = f'media/ai_recording/{new_gif_filename}'
                 execution_record.gif_path = relative_path
 
-                logger.info(f"✅ GIF recording saved to: {relative_path}")
+                logger.info(f"[OK] GIF recording saved to: {relative_path}")
             else:
-                logger.warning(f"⚠️ GIF file not found at: {default_gif_path}")
+                logger.warning(f"[WARNING] GIF file not found at: {default_gif_path}")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to process GIF recording: {e}")
+            logger.warning(f"[WARNING] Failed to process GIF recording: {e}")
 
     def _auto_mark_completed_tasks(self, execution_record):
         """
@@ -3061,14 +3218,14 @@ class AICaseViewSet(viewsets.ModelViewSet):
                         logger.info(f"🔒 Auto-marked task {task['id']} as completed")
 
                 if auto_marked_count > 0:
-                    logger.info(f"✨ Auto-marked {auto_marked_count} tasks as completed")
+                    logger.info(f"[OK] Auto-marked {auto_marked_count} tasks as completed")
                 else:
                     logger.info("📋 No pending tasks needed auto-marking")
 
             # TODO: 可以添加更智能的分析逻辑来识别部分完成的任务
 
         except Exception as e:
-            logger.warning(f"⚠️ Failed to auto-mark completed tasks: {e}")
+            logger.warning(f"[WARNING] Failed to auto-mark completed tasks: {e}")
 
 
 # 全局停止信号字典 {execution_id: bool}
@@ -3205,24 +3362,166 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     except Exception as e:
                         logger.error(f"更新步骤状态失败: {e}", exc_info=True)
 
-                history = run_full_process_sync(
-                    task_description,
-                    analysis_callback=on_analysis_complete,
-                    step_callback=on_step_update,
-                    should_stop=should_stop_async, # 传递异步版本
-                    execution_mode=execution_mode,
-                    enable_gif=enable_gif,  # 传递GIF录制开关
-                    case_name=task_description[:50] if task_description else "Adhoc Task"  # 传递用例名称用于GIF文件命名
-                )
+                try:
+                    history = run_full_process_sync(
+                        task_description,
+                        analysis_callback=on_analysis_complete,
+                        step_callback=on_step_update,
+                        should_stop=should_stop_async, # 传递异步版本
+                        execution_mode=execution_mode,
+                        enable_gif=enable_gif,  # 传递GIF录制开关
+                        case_name=task_description[:50] if task_description else "Adhoc Task"  # 传递用例名称用于GIF文件命名
+                    )
+                except KeyboardInterrupt as ki:
+                    # KeyboardInterrupt 通常表示任务正常完成或被停止
+                    error_msg = str(ki)
+                    if "All tasks completed" in error_msg:
+                        # 任务正常完成，尝试获取history（可能在异常前已经返回）
+                        execution_record.logs += "\n[System] 所有任务已完成，正常结束。"
+                        # 不设置 history = None，尝试使用已有的 history
+                        # 如果确实没有 history，后续逻辑会根据 planned_tasks 状态判断
+                    elif "User requested stop" in error_msg or "Done" in error_msg:
+                        execution_record.status = 'stopped'
+                        execution_record.logs += "\n[System] 任务已由用户停止。"
+                        execution_record.end_time = timezone.now()
+                        execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
+                        execution_record.save()
+                        return
+                    else:
+                        # 其他 KeyboardInterrupt，可能表示正常终止
+                        execution_record.logs += f"\n[System] 任务被中断: {error_msg}"
+                        history = None
+                except Exception as e:
+                    error_message = str(e)
+                    # 检查是否是浏览器启动相关的错误，这些可能是临时错误
+                    is_browser_error = any(keyword in error_message.lower() for keyword in [
+                        'jsondecodeerror', 'expecting value', 'cdp', 'browser start', 
+                        'connection refused', 'timeout', 'browser may not be ready'
+                    ])
+                    
+                    if is_browser_error:
+                        # 浏览器启动错误，可能是临时问题，等待一下看看是否有部分执行结果
+                        logger.warning(f"[WARNING] Browser-related error detected: {error_message}")
+                        execution_record.logs += f"\n[WARNING] 浏览器启动错误（可能是临时问题）: {error_message}"
+                        execution_record.logs += "\n[INFO] 等待检查是否有部分执行结果..."
+                        # 继续执行，检查 history 是否为空
+                        history = None
+                    else:
+                        # 其他错误，直接抛出
+                        raise
 
                 # 检查是否是手动停止 (使用同步版本)
                 if should_stop_sync():
                     execution_record.status = 'stopped'
                     execution_record.logs += "\n[System] 任务已由用户停止。"
+                elif history is None:
+                    # 没有有效的 history，检查 planned_tasks 状态来判断任务是否成功
+                    if execution_record.planned_tasks:
+                        total_tasks = len(execution_record.planned_tasks)
+                        completed_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+                        pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
+                        
+                        # 如果所有任务都完成了，标记为成功
+                        if completed_tasks == total_tasks and total_tasks > 0:
+                            execution_record.status = 'passed'
+                            execution_record.logs += "\n[System] 所有任务已完成（无history但任务状态为完成）。"
+                            logger.info(f"[INFO] All {total_tasks} tasks completed, marking as passed")
+                        elif completed_tasks > 0:
+                            # 有部分任务完成，但不完整，标记为失败
+                            execution_record.status = 'failed'
+                            execution_record.error_message = execution_record.error_message or f"部分任务完成（{completed_tasks}/{total_tasks}），任务未完整执行"
+                            execution_record.logs += f"\n[System] 部分任务完成（{completed_tasks}/{total_tasks}），任务未完整执行。"
+                            logger.warning(f"[WARNING] Partial task completion ({completed_tasks}/{total_tasks}), marking as failed")
+                        else:
+                            # 没有任务完成，标记为失败
+                            execution_record.status = 'failed'
+                            execution_record.error_message = execution_record.error_message or "任务执行异常终止"
+                            execution_record.logs += "\n执行异常终止（可能是浏览器启动失败或系统错误）。"
+                            logger.warning(f"[WARNING] Task execution terminated without history and no completed tasks")
+                    else:
+                        # 没有 planned_tasks 信息，标记为失败
+                        execution_record.status = 'failed'
+                        execution_record.error_message = execution_record.error_message or "任务执行异常终止"
+                        execution_record.logs += "\n执行异常终止（可能是浏览器启动失败或系统错误）。"
+                        logger.warning(f"[WARNING] Task execution terminated without history")
                 else:
-                    # 更新成功状态
-                    execution_record.status = 'passed'
-                    execution_record.logs += "\n执行完成。"
+                    # 格式化 history 为日志，并检查是否有失败的步骤
+                    steps = []
+                    has_failed_step = False
+                    failed_step_info = None
+                    
+                    if history:
+                        if hasattr(history, 'steps') and history.steps:
+                            for i, s in enumerate(history.steps):
+                                step_info = extract_step_info(s, i)
+                                
+                                # 检查步骤是否有错误
+                                if hasattr(s, 'error') and s.error:
+                                    step_info['success'] = False
+                                    step_info['error'] = str(s.error)
+                                    has_failed_step = True
+                                    if not failed_step_info:
+                                        failed_step_info = f"步骤 {i+1} 执行失败: {str(s.error)}"
+                                elif hasattr(s, 'result') and hasattr(s.result, 'error') and s.result.error:
+                                    step_info['success'] = False
+                                    step_info['error'] = str(s.result.error)
+                                    has_failed_step = True
+                                    if not failed_step_info:
+                                        failed_step_info = f"步骤 {i+1} 执行失败: {str(s.result.error)}"
+                                else:
+                                    step_info['success'] = True
+                                
+                                steps.append(step_info)
+                        
+                        # 检查 history 本身是否有错误
+                        if hasattr(history, 'error') and history.error:
+                            has_failed_step = True
+                            failed_step_info = str(history.error)
+
+                    execution_record.steps_completed = steps
+                    
+                    # 根据步骤执行结果更新状态
+                    if has_failed_step:
+                        execution_record.status = 'failed'
+                        execution_record.error_message = failed_step_info or "执行过程中有步骤失败"
+                        execution_record.logs += f"\n执行失败: {execution_record.error_message}"
+                        logger.warning(f"[WARNING] AI任务执行失败: {execution_record.error_message}")
+                    elif steps:
+                        # 有步骤且没有失败，标记为成功
+                        execution_record.status = 'passed'
+                        execution_record.logs += "\n执行完成。"
+                    else:
+                        # 没有步骤，检查 planned_tasks 状态来判断是否成功
+                        if execution_record.planned_tasks:
+                            total_tasks = len(execution_record.planned_tasks)
+                            completed_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+                            
+                            # 如果所有任务都完成了，即使没有steps也标记为成功
+                            if completed_tasks == total_tasks and total_tasks > 0:
+                                execution_record.status = 'passed'
+                                execution_record.logs += "\n[System] 所有任务已完成（无步骤记录但任务状态为完成）。"
+                                logger.info(f"[INFO] All {total_tasks} tasks completed (no steps but tasks marked as completed)")
+                            elif completed_tasks > 0:
+                                # 有部分任务完成，检查是否有错误信息
+                                if not execution_record.error_message:
+                                    execution_record.status = 'passed'  # 部分完成也算成功
+                                    execution_record.logs += f"\n[System] {completed_tasks}/{total_tasks} 任务已完成。"
+                                    logger.info(f"[INFO] {completed_tasks}/{total_tasks} tasks completed, marking as passed")
+                                else:
+                                    # 有错误信息，标记为失败
+                                    execution_record.status = 'failed'
+                                    execution_record.logs += "\n执行异常终止。"
+                            elif not execution_record.error_message:
+                                # 没有任务完成且没有错误信息，标记为失败
+                                execution_record.status = 'failed'
+                                execution_record.error_message = "任务执行异常，未生成执行步骤"
+                                execution_record.logs += "\n执行异常：未生成执行步骤。"
+                            # 如果有错误信息，状态已经在前面设置为 failed，不需要重复设置
+                        elif not execution_record.error_message:
+                            # 没有 planned_tasks 且没有错误信息，标记为失败
+                            execution_record.status = 'failed'
+                            execution_record.error_message = "任务执行异常，未生成执行步骤"
+                            execution_record.logs += "\n执行异常：未生成执行步骤。"
 
                     # 记录任务完成统计信息
                     if execution_record.planned_tasks:
@@ -3233,14 +3532,6 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 
                 execution_record.end_time = timezone.now()
                 execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                
-                # 格式化 history 为日志 (如果不是停止状态)
-                steps = []
-                if history:
-                    if hasattr(history, 'steps'):
-                        steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
-
-                execution_record.steps_completed = steps
 
                 # 自动标记已完成的任务
                 if execution_record.planned_tasks:
@@ -3252,11 +3543,25 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 execution_record.save()
 
             except Exception as e:
-                execution_record.status = 'failed'
-                execution_record.end_time = timezone.now()
-                execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                execution_record.logs += f"\n执行出错: {str(e)}"
-                execution_record.save()
+                # 最终异常处理：只有在没有设置状态的情况下才设置为失败
+                if execution_record.status == 'running':
+                    execution_record.status = 'failed'
+                    execution_record.end_time = timezone.now()
+                    execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
+                    error_message = str(e)
+                    
+                    # 检查是否是账户余额不足错误
+                    if 'balance' in error_message.lower() or 'insufficient' in error_message.lower() or '余额不足' in error_message or '30001' in error_message:
+                        execution_record.error_message = "API账户余额不足，请充值后重试"
+                        execution_record.logs += f"\n[ERROR] {execution_record.error_message}\n详细错误: {error_message}"
+                    else:
+                        execution_record.error_message = error_message
+                        execution_record.logs += f"\n执行出错: {error_message}"
+                    
+                    execution_record.save()
+                else:
+                    # 状态已经被设置，只记录错误日志
+                    logger.error(f"[ERROR] Task execution error (status already set to {execution_record.status}): {e}")
             finally:
                 # 清理停止信号
                 if execution_record.id in STOP_SIGNALS:
@@ -3325,15 +3630,15 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 # 移动并重命名文件
                 shutil.move(default_gif_path, new_gif_path)
 
-                # 保存相对路径到数据库
-                relative_path = os.path.join('media', 'ai_recording', new_gif_filename)
+                # 保存相对路径到数据库（使用正斜杠，确保URL兼容）
+                relative_path = f'media/ai_recording/{new_gif_filename}'
                 execution_record.gif_path = relative_path
 
-                logger.info(f"✅ GIF recording saved to: {relative_path}")
+                logger.info(f"[OK] GIF recording saved to: {relative_path}")
             else:
-                logger.warning(f"⚠️ GIF file not found at: {default_gif_path}")
+                logger.warning(f"[WARNING] GIF file not found at: {default_gif_path}")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to process GIF recording: {e}")
+            logger.warning(f"[WARNING] Failed to process GIF recording: {e}")
 
     def _auto_mark_completed_tasks(self, execution_record):
         """
@@ -3360,14 +3665,14 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                         logger.info(f"🔒 Auto-marked task {task['id']} as completed")
 
                 if auto_marked_count > 0:
-                    logger.info(f"✨ Auto-marked {auto_marked_count} tasks as completed")
+                    logger.info(f"[OK] Auto-marked {auto_marked_count} tasks as completed")
                 else:
                     logger.info("📋 No pending tasks needed auto-marking")
 
             # TODO: 可以添加更智能的分析逻辑来识别部分完成的任务
 
         except Exception as e:
-            logger.warning(f"⚠️ Failed to auto-mark completed tasks: {e}")
+            logger.warning(f"[WARNING] Failed to auto-mark completed tasks: {e}")
 
     @action(detail=True, methods=['get'], url_path='report')
     def generate_report(self, request, pk=None):

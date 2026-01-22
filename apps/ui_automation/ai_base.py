@@ -38,9 +38,9 @@ try:
     from browser_use.tools.registry.views import ActionModel
     from pydantic import ConfigDict
     ActionModel.model_config = ConfigDict(arbitrary_types_allowed=True, extra='allow')
-    logger.info("✅ Modified ActionModel.model_config to allow extra fields")
+    logger.info("[OK] Modified ActionModel.model_config to allow extra fields")
 except Exception as e:
-    logger.warning(f"⚠️ Failed to modify ActionModel config: {e}")
+        logger.warning(f"[WARNING] Failed to modify ActionModel config: {e}")
 
 # Patch Agent.get_model_output 方法
 try:
@@ -52,10 +52,10 @@ try:
 
     async def _patched_get_model_output(self, input_messages):
         """修补后的 get_model_output，直接从 response.content 解析 JSON"""
-        # logger.info("🔧 _patched_get_model_output called")
+        # logger.info("[TOOL] _patched_get_model_output called")
 
         if hasattr(self, '_task_was_done') and self._task_was_done:
-            logger.info("🔧 Task was marked as done, stopping LLM interaction")
+            logger.info("[OPT] Task was marked as done, stopping LLM interaction")
             raise KeyboardInterrupt("Task finished")
 
         kwargs = {'output_format': self.AgentOutput}
@@ -74,29 +74,52 @@ try:
                 break
             except asyncio.TimeoutError as te:
                 last_exception = te
-                logger.warning(f"⚠️ LLM invocation timed out (attempt {attempt+1}/{max_retries}): {te}")
+                logger.warning(f"[WARNING] LLM invocation timed out (attempt {attempt+1}/{max_retries}): {te}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(0.5)  # 重试间隔0.5秒
             except Exception as e:
                 last_exception = e
-                logger.warning(f"⚠️ LLM invocation failed (attempt {attempt+1}/{max_retries}): {e}")
+                error_str = str(e)
+                
+                # 检查是否是账户余额不足错误
+                if 'balance' in error_str.lower() or 'insufficient' in error_str.lower() or '30001' in error_str:
+                    logger.error(f"[ERROR] API账户余额不足: {error_str}")
+                    error_msg = "API账户余额不足，请充值后重试"
+                    raise ValueError(error_msg) from e
+                
+                # 检查是否是403错误
+                if '403' in error_str or 'forbidden' in error_str.lower():
+                    logger.error(f"[ERROR] API访问被拒绝(403): {error_str}")
+                    if 'balance' in error_str.lower() or 'insufficient' in error_str.lower():
+                        error_msg = "API账户余额不足，请充值后重试"
+                    else:
+                        error_msg = f"API访问被拒绝: {error_str}"
+                    raise ValueError(error_msg) from e
+                
+                logger.warning(f"[WARNING] LLM invocation failed (attempt {attempt+1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(0.5)  # 重试间隔0.5秒
         else:
-            logger.error(f"❌ LLM invocation failed after {max_retries} attempts.")
+            logger.error(f"[ERROR] LLM invocation failed after {max_retries} attempts.")
+            # 检查最后的异常是否是余额不足
+            if last_exception:
+                error_str = str(last_exception)
+                if 'balance' in error_str.lower() or 'insufficient' in error_str.lower() or '30001' in error_str:
+                    error_msg = "API账户余额不足，请充值后重试"
+                    raise ValueError(error_msg) from last_exception
             raise last_exception
 
         # 检查响应是否为空或无效
         if not response or not hasattr(response, 'content'):
             error_msg = "LLM returned invalid response (no content attribute)"
-            logger.error(f"❌ {error_msg}")
+            logger.error(f"[ERROR] {error_msg}")
             raise ValueError(error_msg)
 
         # 检查content是否为空字符串
         content = response.content
         if not content or not isinstance(content, str) or not content.strip():
             error_msg = "LLM returned empty content - possible API error or timeout"
-            logger.error(f"❌ {error_msg}")
+            logger.error(f"[ERROR] {error_msg}")
             raise ValueError(error_msg)
 
         try:
@@ -159,13 +182,13 @@ try:
                 return parsed
         except Exception as e:
             # If our complex normalization fails, fall back to the original method
-            logger.warning(f"⚠️ Custom output normalization failed, falling back: {e}")
+            logger.warning(f"[WARNING] Custom output normalization failed, falling back: {e}")
             return await _original_get_model_output(self, input_messages)
     
     Agent.get_model_output = _patched_get_model_output
-    logger.info("✅ Successfully patched Agent.get_model_output")
+    logger.info("[OK] Successfully patched Agent.get_model_output")
 except Exception as e:
-    logger.error(f"❌ Failed to patch Agent.get_model_output: {e}")
+    logger.error(f"[ERROR] Failed to patch Agent.get_model_output: {e}")
 
 # Patch TokenCost
 try:
@@ -226,16 +249,39 @@ try:
                     break
                 except Exception as e:
                     last_exception = e
-                    if "response_format" in str(e):
+                    error_str = str(e)
+                    
+                    # 检查是否是账户余额不足错误
+                    if 'balance' in error_str.lower() or 'insufficient' in error_str.lower() or '30001' in error_str:
+                        logger.error(f"[ERROR] API账户余额不足: {error_str}")
+                        error_msg = "API账户余额不足，请充值后重试"
+                        raise ValueError(error_msg) from e
+                    
+                    # 检查是否是403错误
+                    if '403' in error_str or 'forbidden' in error_str.lower():
+                        logger.error(f"[ERROR] API访问被拒绝(403): {error_str}")
+                        if 'balance' in error_str.lower() or 'insufficient' in error_str.lower():
+                            error_msg = "API账户余额不足，请充值后重试"
+                        else:
+                            error_msg = f"API访问被拒绝: {error_str}"
+                        raise ValueError(error_msg) from e
+                    
+                    if "response_format" in error_str:
                         kwargs.pop('response_format', None)
                         # retry immediately without response_format
                         continue
 
-                    logger.warning(f"⚠️ LLM ainvoke failed (attempt {attempt+1}/{max_retries}): {e}")
+                    logger.warning(f"[WARNING] LLM ainvoke failed (attempt {attempt+1}/{max_retries}): {e}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(0.5)  # 等待0.5秒
             else:
-                logger.error(f"❌ LLM ainvoke failed after {max_retries} attempts.")
+                logger.error(f"[ERROR] LLM ainvoke failed after {max_retries} attempts.")
+                # 检查最后的异常是否是余额不足
+                if last_exception:
+                    error_str = str(last_exception)
+                    if 'balance' in error_str.lower() or 'insufficient' in error_str.lower() or '30001' in error_str:
+                        error_msg = "API账户余额不足，请充值后重试"
+                        raise ValueError(error_msg) from last_exception
                 raise last_exception
 
             # Enhance response parsing
@@ -310,7 +356,7 @@ try:
                         action_list.append(_ActionWrapper(action_dict))
                     object.__setattr__(agent_output, 'action', action_list)
                 except Exception as e:
-                    logger.error(f"🔧 Failed to create AgentOutput: {e}")
+                    logger.error(f"[ERROR] Failed to create AgentOutput: {e}")
 
             class _ResponseWrapper:
                 def __init__(self, orig, completion_obj):
@@ -339,9 +385,9 @@ try:
         return llm
     
     TokenCost.register_llm = _patched_register_llm
-    logger.info("✅ Successfully patched TokenCost.register_llm")
+    logger.info("[OK] Successfully patched TokenCost.register_llm")
 except Exception as e:
-    logger.error(f"❌ Failed to patch TokenCost: {e}")
+    logger.error(f"[ERROR] Failed to patch TokenCost: {e}")
 
 # Patch BrowserSession.connect (Windows CDP fix)
 try:
@@ -351,40 +397,221 @@ try:
     _original_connect = BrowserSession.connect
     
     async def _patched_connect(self, cdp_url=None):
-        if cdp_url: return await _original_connect(self, cdp_url=cdp_url)
+        # 如果提供了 cdp_url，需要确保它是 WebSocket URL 格式
+        if cdp_url:
+            # 检查并转换 HTTP URL 为 WebSocket URL
+            if cdp_url.startswith('http://'):
+                # 从 HTTP URL 提取端口，然后从 CDP endpoint 获取 WebSocket URL
+                try:
+                    import re
+                    port_match = re.search(r':(\d+)', cdp_url)
+                    if port_match:
+                        port = int(port_match.group(1))
+                        # 使用 127.0.0.1 而不是 localhost，避免 VPN 路由问题
+                        cdp_endpoint = f"http://127.0.0.1:{port}/json/version"
+                        
+                        # 尝试从 endpoint 获取 WebSocket URL
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            for retry in range(3):
+                                try:
+                                    response = await client.get(cdp_endpoint)
+                                    if response.status_code == 200 and response.text:
+                                        version_info = response.json()
+                                        if 'webSocketDebuggerUrl' in version_info:
+                                            cdp_url = version_info['webSocketDebuggerUrl']
+                                            logger.info(f"[INFO] Converted HTTP URL to WebSocket URL: {cdp_url}")
+                                            break
+                                except Exception as e:
+                                    if retry < 2:
+                                        await asyncio.sleep(1.0)
+                                        continue
+                                    logger.warning(f"[WARNING] Failed to get WebSocket URL from endpoint: {e}")
+                    else:
+                        # 如果无法提取端口，尝试直接转换
+                        cdp_url = cdp_url.replace('http://', 'ws://').replace('https://', 'wss://')
+                        logger.info(f"[INFO] Converted HTTP URL to WebSocket URL: {cdp_url}")
+                except Exception as e:
+                    logger.warning(f"[WARNING] Failed to convert CDP URL format: {e}, using as-is")
+            
+            logger.info(f"[INFO] Using provided CDP URL: {cdp_url}")
+            try:
+                return await _original_connect(self, cdp_url=cdp_url)
+            except Exception as e:
+                error_str = str(e)
+                # 如果是 JSON 解析错误，可能是 URL 格式问题，尝试重新获取
+                if 'JSONDecodeError' in error_str or 'Expecting value' in error_str:
+                    logger.warning(f"[WARNING] CDP URL may be invalid, will try to re-fetch: {e}")
+                    # 清除 cdp_url，让下面的逻辑重新获取
+                    cdp_url = None
+                else:
+                    raise
         
         browser_profile = getattr(self, 'browser_profile', None)
+        if not browser_profile:
+            logger.warning("[WARNING] Browser profile not found, using original connect")
+            return await _original_connect(self, cdp_url=cdp_url)
+            
+        # 如果 browser_profile 已经有 cdp_url，先尝试使用，如果失败则重新获取
         if hasattr(browser_profile, 'cdp_url') and browser_profile.cdp_url:
-            return await _original_connect(self, cdp_url=browser_profile.cdp_url)
+            logger.info(f"[INFO] Using existing CDP URL from browser_profile: {browser_profile.cdp_url}")
+            try:
+                # 等待一小段时间确保浏览器完全启动
+                await asyncio.sleep(0.5)
+                return await _original_connect(self, cdp_url=browser_profile.cdp_url)
+            except Exception as e:
+                error_str = str(e)
+                # 如果 CDP URL 无效，清除它并重新获取
+                if 'JSONDecodeError' in error_str or 'Expecting value' in error_str or 'connection refused' in error_str.lower():
+                    logger.warning(f"[WARNING] Existing CDP URL is invalid, clearing and re-fetching: {e}")
+                    browser_profile.cdp_url = None
+                    # 继续执行下面的逻辑重新获取 CDP URL
+                else:
+                    raise
         
         port = 9222
         if hasattr(browser_profile, 'extra_chromium_args'):
             for arg in browser_profile.extra_chromium_args:
                 if '--remote-debugging-port=' in str(arg):
-                    try: port = int(arg.split('=')[1]); break
-                    except: pass
+                    try: 
+                        port = int(arg.split('=')[1])
+                        break
+                    except: 
+                        pass
         if hasattr(browser_profile, 'remote_debugging_port'):
             port = browser_profile.remote_debugging_port
             
-        cdp_endpoint = f"http://localhost:{port}/json/version"
+        # 使用 127.0.0.1 而不是 localhost，避免 VPN 路由问题
+        cdp_endpoint = f"http://127.0.0.1:{port}/json/version"
         
-        for attempt in range(5):
+        # 增加重试次数和等待时间，给浏览器更多时间启动
+        for attempt in range(10):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(timeout=15.0) as client:
                     response = await client.get(cdp_endpoint)
-                    if response.status_code == 200 and response.text:
+                    
+                    # 检查响应状态码
+                    if response.status_code != 200:
+                        # 502 错误通常是 VPN 路由 localhost 流量导致的
+                        if response.status_code == 502:
+                            logger.warning(f"CDP endpoint returned status 502 (Bad Gateway), attempt {attempt + 1}/10")
+                            logger.warning("[WARNING] This may be caused by VPN routing localhost traffic. Ensure VPN is not intercepting local connections.")
+                            # 对于502错误，尝试使用127.0.0.1（如果之前用的是localhost）
+                            if 'localhost' in cdp_endpoint:
+                                cdp_endpoint = cdp_endpoint.replace('localhost', '127.0.0.1')
+                                logger.info(f"[INFO] Retrying with 127.0.0.1 instead of localhost")
+                        else:
+                            logger.warning(f"CDP endpoint returned status {response.status_code}, attempt {attempt + 1}/10")
+                        if attempt < 9:
+                            await asyncio.sleep(2.0)  # 增加等待时间
+                        continue
+                    
+                    # 检查响应内容是否为空
+                    if not response.text or not response.text.strip():
+                        logger.warning(f"CDP endpoint returned empty response, attempt {attempt + 1}/10")
+                        if attempt < 9:
+                            await asyncio.sleep(2.0)
+                        continue
+                    
+                    # 验证是否为有效的 JSON
+                    try:
                         version_info = response.json()
-                        browser_profile.cdp_url = version_info['webSocketDebuggerUrl']
-                        return await _original_connect(self, cdp_url=browser_profile.cdp_url)
-            except Exception:
-                if attempt < 4: await asyncio.sleep(1.0)
+                    except Exception as json_error:
+                        logger.error(f"Failed to parse CDP response as JSON (attempt {attempt + 1}/10): {json_error}")
+                        logger.debug(f"Response content: {response.text[:200]}")  # 只记录前200个字符
+                        if attempt < 9:
+                            await asyncio.sleep(2.0)
+                        continue
+                    
+                    # 检查是否包含必需的字段
+                    if 'webSocketDebuggerUrl' not in version_info:
+                        logger.error(f"CDP response missing 'webSocketDebuggerUrl' field (attempt {attempt + 1}/10)")
+                        logger.debug(f"Response keys: {version_info.keys()}")
+                        if attempt < 9:
+                            await asyncio.sleep(2.0)
+                        continue
+                    
+                    # 成功获取 CDP URL
+                    cdp_ws_url = version_info.get('webSocketDebuggerUrl')
+                    if not cdp_ws_url:
+                        logger.error(f"[ERROR] CDP response missing 'webSocketDebuggerUrl' field")
+                        logger.debug(f"Response content: {version_info}")
+                        if attempt < 9:
+                            await asyncio.sleep(2.0)
+                            continue
+                        else:
+                            raise ValueError("CDP response missing 'webSocketDebuggerUrl' field")
+                    
+                    browser_profile.cdp_url = cdp_ws_url
+                    logger.info(f"[INFO] Successfully retrieved CDP URL: {browser_profile.cdp_url}")
+                    
+                    # 在连接前，先等待一小段时间确保浏览器完全启动
+                    # 这样可以避免浏览器还未完全启动就尝试连接导致的 JSON 解析错误
+                    if attempt < 3:  # 前几次尝试等待更长时间
+                        await asyncio.sleep(1.0)
+                    else:
+                        await asyncio.sleep(0.5)
+                    
+                    # 执行连接（使用更长的超时时间）
+                    try:
+                        result = await asyncio.wait_for(
+                            _original_connect(self, cdp_url=browser_profile.cdp_url),
+                            timeout=30.0  # 增加连接超时到30秒
+                        )
+                        # 连接成功，等待 CDP 客户端完全初始化
+                        await asyncio.sleep(0.5)
+                        logger.info(f"[INFO] CDP connection established successfully")
+                        return result
+                    except asyncio.TimeoutError:
+                        logger.error("[ERROR] Browser CDP connection timeout after 30 seconds")
+                        # 清除无效的 CDP URL
+                        browser_profile.cdp_url = None
+                        if attempt < 9:
+                            await asyncio.sleep(3.0)
+                            continue
+                        raise
+                    except Exception as connect_error:
+                        # 捕获连接过程中的任何错误，包括 JSON 解析错误
+                        error_str = str(connect_error)
+                        if 'JSONDecodeError' in error_str or 'Expecting value' in error_str:
+                            logger.error(f"[ERROR] CDP connection failed due to JSON parsing error: {connect_error}")
+                            logger.error(f"[ERROR] This may indicate the browser CDP endpoint returned invalid data")
+                            # 清除无效的 CDP URL
+                            browser_profile.cdp_url = None
+                            # 尝试重试
+                            if attempt < 9:
+                                logger.warning(f"[WARNING] Retrying CDP connection (attempt {attempt + 2}/10)")
+                                await asyncio.sleep(3.0)  # 等待更长时间
+                                continue
+                        elif 'connection refused' in error_str.lower() or 'cannot connect' in error_str.lower():
+                            logger.warning(f"[WARNING] CDP connection refused, retrying (attempt {attempt + 1}/10)")
+                            browser_profile.cdp_url = None
+                            if attempt < 9:
+                                await asyncio.sleep(2.0)
+                                continue
+                        raise
+                    
+            except httpx.TimeoutException:
+                logger.warning(f"CDP endpoint timeout (attempt {attempt + 1}/10), browser may not be ready yet")
+                if attempt < 9:
+                    await asyncio.sleep(2.0)
+            except httpx.ConnectError:
+                logger.warning(f"Cannot connect to CDP endpoint at {cdp_endpoint} (attempt {attempt + 1}/10), browser may not be ready yet")
+                if attempt < 9:
+                    await asyncio.sleep(2.0)
+            except Exception as e:
+                logger.error(f"Unexpected error connecting to CDP endpoint (attempt {attempt + 1}/10): {e}")
+                if attempt < 9:
+                    await asyncio.sleep(2.0)
         
+        # 所有重试都失败了，记录错误并尝试使用原始连接
+        logger.error(f"Failed to connect to CDP endpoint after 10 attempts: {cdp_endpoint}")
+        logger.error("Browser may not have started properly or CDP endpoint is not available")
         return await _original_connect(self, cdp_url=cdp_url)
     
     BrowserSession.connect = _patched_connect
-    logger.info("✅ Successfully patched BrowserSession.connect")
+    logger.info("[OK] Successfully patched BrowserSession.connect")
 except Exception as e:
-    logger.error(f"❌ Failed to patch BrowserSession.connect: {e}")
+    logger.error(f"[ERROR] Failed to patch BrowserSession.connect: {e}")
 
 # Patch ClickElementAction parameters
 try:
@@ -420,7 +647,7 @@ try:
     async def _patched_execute_action(self, action_name: str, params: dict, **kwargs):
         # 自动映射 switch_tab -> switch (强制映射)
         if action_name == 'switch_tab':
-            logger.info(f"🔧 Force aliasing: switch_tab -> switch")
+            logger.info(f"[OPT] Force aliasing: switch_tab -> switch")
             action_name = 'switch'
         
         if isinstance(params, int):
@@ -439,13 +666,27 @@ try:
             # 尤其是对于 element-plus 等 UI 框架，下拉列表渲染需要时间
             await asyncio.sleep(1.5)
             return result
+        
+        # 针对输入操作增加延迟，确保 GIF 录制能捕获到输入过程
+        # 这对于用户名、密码等关键输入步骤的录制特别重要
+        if action_name in ['input_text', 'fill', 'type', 'input']:
+            result = await _original_execute_action(self, action_name, params, **kwargs)
+            # 输入后等待 1.0 秒，确保：
+            # 1. 输入值已正确填充到输入框
+            # 2. 浏览器的截图能够捕获到输入后的状态
+            # 3. GIF 录制能够包含输入操作的完整过程
+            # 这对于密码输入等敏感操作的可视化回放非常重要
+            await asyncio.sleep(1.0)
+            # 额外的短暂等待，确保表单验证等异步操作完成
+            await asyncio.sleep(0.3)
+            return result
             
         return await _original_execute_action(self, action_name, params, **kwargs)
         
     ToolRegistry.execute_action = _patched_execute_action
-    logger.info("✅ Successfully patched ToolRegistry.execute_action with alias support")
+    logger.info("[OK] Successfully patched ToolRegistry.execute_action with alias support")
 except Exception as e:
-    logger.error(f"❌ Failed to patch ToolRegistry: {e}")
+    logger.error(f"[ERROR] Failed to patch ToolRegistry: {e}")
 
 # Patch ScreenshotWatchdog GLOBALLY to fix timeouts
 try:
@@ -497,7 +738,7 @@ try:
         
         on_ScreenshotEvent._is_patched_global = True
         ScreenshotWatchdog.on_ScreenshotEvent = on_ScreenshotEvent
-        logger.info("✅ Applied Global ScreenshotWatchdog Patch")
+        logger.info("[OK] Applied Global ScreenshotWatchdog Patch")
 
     # Patch DOMWatchdog
     from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
@@ -515,10 +756,109 @@ try:
                 
         _capture_clean_screenshot._is_patched_global = True
         DOMWatchdog._capture_clean_screenshot = _capture_clean_screenshot
-        logger.info("✅ Applied Global DOMWatchdog Patch")
+        logger.info("[OK] Applied Global DOMWatchdog Patch")
+    
+    # Patch StorageStateWatchdog to handle CDP client not initialized error
+    from browser_use.browser.watchdogs.storage_state_watchdog import StorageStateWatchdog
+    _original_on_save_storage_state = StorageStateWatchdog.on_SaveStorageStateEvent
+    
+    if not getattr(_original_on_save_storage_state, '_is_patched_storage', False):
+        async def on_SaveStorageStateEvent(self, event):
+            """
+            Patched storage state save handler with CDP initialization check.
+            Gracefully handles the case when CDP client is not initialized yet.
+            """
+            try:
+                # 首先检查 browser_session 是否存在
+                if not hasattr(self, 'browser_session') or self.browser_session is None:
+                    logger.warning("[WARNING] Browser session not available, skipping storage state save")
+                    return
+                
+                # 尝试获取或创建 CDP session 来验证连接（这会触发初始化检查）
+                try:
+                    session = await self.browser_session.get_or_create_cdp_session(target_id=None)
+                    if session is None:
+                        logger.warning("[WARNING] Failed to get CDP session, skipping storage state save")
+                        return
+                except AssertionError as e:
+                    if 'Root CDP client not initialized' in str(e):
+                        logger.warning("[WARNING] Root CDP client not initialized, skipping storage state save")
+                        return
+                    raise
+                except AttributeError as e:
+                    if '_cdp_client_root' in str(e):
+                        logger.warning("[WARNING] CDP client root attribute not available, skipping storage state save")
+                        return
+                    raise
+                
+                # 如果 CDP 已初始化，正常执行保存操作
+                return await _original_on_save_storage_state(self, event)
+                
+            except AssertionError as e:
+                if 'Root CDP client not initialized' in str(e):
+                    logger.warning("[WARNING] StorageStateWatchdog: CDP client not initialized, skipping save")
+                    return
+                raise
+            except AttributeError as e:
+                if '_cdp_client_root' in str(e) or 'browser_session' in str(e):
+                    logger.warning(f"[WARNING] StorageStateWatchdog: Missing required attribute, skipping save: {e}")
+                    return
+                raise
+            except Exception as e:
+                # 记录错误但不抛出，避免影响主要流程
+                logger.warning(f"[WARNING] StorageStateWatchdog failed to save storage state: {e}")
+                return
+        
+        on_SaveStorageStateEvent._is_patched_storage = True
+        StorageStateWatchdog.on_SaveStorageStateEvent = on_SaveStorageStateEvent
+        logger.info("[OK] Applied Global StorageStateWatchdog Patch")
+    
+    # Patch BrowserStartEvent handler to increase timeout
+    try:
+        from browser_use.browser.session import BrowserSession
+        _original_on_browser_start = None
+        
+        # 检查是否存在 on_BrowserStartEvent 方法
+        if hasattr(BrowserSession, 'on_BrowserStartEvent'):
+            _original_on_browser_start = BrowserSession.on_BrowserStartEvent
+            
+            if not getattr(_original_on_browser_start, '_is_patched_start', False):
+                async def on_BrowserStartEvent(self, event):
+                    """
+                    Patched browser start event handler with increased timeout and better error handling.
+                    """
+                    try:
+                        # 使用更长的超时时间等待浏览器启动（30秒）
+                        result = await asyncio.wait_for(
+                            _original_on_browser_start(self, event),
+                            timeout=30.0  # 增加超时到30秒
+                        )
+                        return result
+                    except asyncio.TimeoutError:
+                        logger.error("[ERROR] Browser start timeout after 30 seconds")
+                        raise
+                    except Exception as e:
+                        error_str = str(e)
+                        # 检查是否是 JSON 解析错误
+                        if 'JSONDecodeError' in error_str or 'Expecting value' in error_str:
+                            logger.error(f"[ERROR] Browser start failed: JSON parsing error - {e}")
+                            logger.error("[ERROR] This usually means the browser CDP endpoint is not ready or returned invalid data")
+                            logger.error("[ERROR] Possible causes:")
+                            logger.error("[ERROR] 1. Browser is still starting up")
+                            logger.error("[ERROR] 2. CDP endpoint is not accessible")
+                            logger.error("[ERROR] 3. Browser crashed during startup")
+                        else:
+                            logger.error(f"[ERROR] Browser start failed: {e}")
+                        raise
+                
+                on_BrowserStartEvent._is_patched_start = True
+                BrowserSession.on_BrowserStartEvent = on_BrowserStartEvent
+                logger.info("[OK] Applied Global BrowserStartEvent Patch")
+    except Exception as browser_start_error:
+        logger.warning(f"[WARNING] Failed to patch BrowserStartEvent: {browser_start_error}")
 
 except Exception as e:
-    logger.error(f"❌ Failed to apply Global Watchdog patches: {e}")
+    logger.error(f"[ERROR] Failed to apply Global Watchdog patches: {e}")
 
 # Patch Agent verdict
 try:
@@ -732,6 +1072,10 @@ class BaseBrowserAgent:
             '--disable-backgrounding-occluded-windows',
             '--disable-extensions',
             '--disable-web-security',  # 允许跨域请求
+            # 忽略 HTTPS 证书错误
+            '--ignore-certificate-errors',
+            '--ignore-ssl-errors',
+            '--ignore-certificate-errors-spki-list',
         ]
 
         # 根据操作系统添加特定参数
@@ -782,7 +1126,7 @@ class BaseBrowserAgent:
 
         @controller.action('mark_task_complete')
         async def mark_task_complete(task_id: int):
-            logger.info(f"✅ Explicitly marking task {task_id} as completed")
+            logger.info(f"[OK] Explicitly marking task {task_id} as completed")
             if callback:
                 try:
                     data = {'task_id': int(task_id), 'status': 'completed'}
@@ -834,7 +1178,7 @@ class BaseBrowserAgent:
         try:
              # 在中文标点前加空格，避免它们成为 URL 的一部分
              final_task = re.sub(r'(https?://[^\s\u4e00-\u9fa5]+?)(?=[，；。、！])', r'\1 ', final_task)
-             logger.info(f"🔧 Optimized task description for URL extraction")
+             logger.info(f"[OPT] Optimized task description for URL extraction")
         except:
              pass
 
@@ -858,8 +1202,10 @@ class BaseBrowserAgent:
         # Callback helper - 添加任务标记跟踪
         last_processed_step = 0
         last_marked_task_id = 0  # 跟踪上一次标记的任务ID
+        completed_task_ids = set()  # 跟踪已完成的任务ID
+        
         async def on_step_end(agent_instance):
-            nonlocal last_processed_step, last_marked_task_id
+            nonlocal last_processed_step, last_marked_task_id, completed_task_ids
 
             if should_stop:
                 do_stop = await should_stop() if asyncio.iscoroutinefunction(should_stop) else should_stop()
@@ -889,16 +1235,23 @@ class BaseBrowserAgent:
                             if 'mark_task_complete' in action_dict:
                                 step_has_task_complete = True
                                 step_marked_task_id = action_dict['mark_task_complete'].get('task_id')
-                                last_marked_task_id = step_marked_task_id
+                                if step_marked_task_id:
+                                    completed_task_ids.add(int(step_marked_task_id))
+                                    last_marked_task_id = step_marked_task_id
                                 break
 
                         # 检查这一步是否有实际操作（非mark_task_complete的操作）
                         has_real_action = False
+                        has_task_completing_action = False  # 检查是否有可以表示任务完成的操作
                         for action in actions:
                             action_dict = action.model_dump() if hasattr(action, 'model_dump') else getattr(action, '_action_dict', {})
                             for key in action_dict.keys():
                                 if key not in ['mark_task_complete', 'done']:
                                     has_real_action = True
+                                    # 只有某些操作可以表示任务完成（排除中间操作如scroll, wait等）
+                                    # 这些操作通常表示任务的核心动作已完成
+                                    if key in ['click', 'fill', 'submit', 'select', 'navigate', 'go']:
+                                        has_task_completing_action = True
                                     break
                             if has_real_action:
                                 break
@@ -910,9 +1263,10 @@ class BaseBrowserAgent:
                             if asyncio.iscoroutinefunction(callback): await callback({'type': 'log', 'content': log_content})
                             else: callback({'type': 'log', 'content': log_content})
 
-                        # 关键修复：如果这一步有实际操作但没有调用mark_task_complete，
+                        # 关键修复：如果这一步有可以表示任务完成的操作但没有调用mark_task_complete，
                         # 且planned_tasks中下一个未标记的任务ID应该被标记
-                        if has_real_action and not step_has_task_complete and planned_tasks:
+                        # 注意：scroll、wait等中间操作不应该触发自动标记
+                        if has_task_completing_action and not step_has_task_complete and planned_tasks:
                             # 找出下一个应该标记的任务ID
                             next_expected_task_id = last_marked_task_id + 1
                             if next_expected_task_id <= len(planned_tasks):
@@ -925,17 +1279,31 @@ class BaseBrowserAgent:
 
                                 if not task_already_marked:
                                     # 自动补充标记这个任务
-                                    logger.warning(f"⚠️ Auto-fixing: Step {i+1} had actions but no mark_task_complete. Auto-marking task {next_expected_task_id} as completed.")
+                                    logger.warning(f"[WARNING] Auto-fixing: Step {i+1} had actions but no mark_task_complete. Auto-marking task {next_expected_task_id} as completed.")
                                     data = {'task_id': int(next_expected_task_id), 'status': 'completed'}
                                     if asyncio.iscoroutinefunction(callback):
                                         await callback(data)
                                     else:
                                         callback(data)
                                     last_marked_task_id = next_expected_task_id
+                                    completed_task_ids.add(int(next_expected_task_id))
+                                    
+                                    # 检查是否所有任务都已完成
+                                    if planned_tasks and len(completed_task_ids) >= len(planned_tasks):
+                                        logger.info(f"[OK] All {len(planned_tasks)} tasks completed, auto-terminating")
+                                        raise KeyboardInterrupt("All tasks completed")
 
+                    except KeyboardInterrupt:
+                        raise  # 重新抛出 KeyboardInterrupt
                     except Exception as e:
-                        logger.warning(f"⚠️ Error in on_step_end processing: {e}")
+                        logger.warning(f"[WARNING] Error in on_step_end processing: {e}")
+                
                 last_processed_step = len(history)
+                
+                # 最终检查：如果所有任务都已完成，自动结束
+                if planned_tasks and len(completed_task_ids) >= len(planned_tasks):
+                    logger.info(f"[OK] All {len(planned_tasks)} tasks completed after step {last_processed_step}, auto-terminating")
+                    raise KeyboardInterrupt("All tasks completed")
 
         try:
             # Try to pass callback
@@ -954,13 +1322,13 @@ class BaseBrowserAgent:
         # 在任务结束时检查不一致的任务状态
         history = getattr(agent, 'history', [])
         if history:
-            logger.info("🔍 Performing final task status consistency check")
+            logger.info("[CHECK] Performing final task status consistency check")
             # 检查是否有任务执行了但未标记完成
             executed_tasks_info = self._find_executed_tasks(history)
             if executed_tasks_info and executed_tasks_info.get('unmarked_actions'):
-                logger.warning(f"⚠️ Found {executed_tasks_info['executed_actions']} executed actions, but only {len(executed_tasks_info['marked_tasks'])} tasks were explicitly marked complete")
-                logger.warning(f"⚠️ Unmarked actions: {executed_tasks_info['unmarked_actions']}")
-                logger.warning("⚠️ This indicates the AI agent did not follow the 'mark_task_complete' rule properly.")
+                logger.warning(f"[WARNING] Found {executed_tasks_info['executed_actions']} executed actions, but only {len(executed_tasks_info['marked_tasks'])} tasks were explicitly marked complete")
+                logger.warning(f"[WARNING] Unmarked actions: {executed_tasks_info['unmarked_actions']}")
+                logger.warning("[WARNING] This indicates the AI agent did not follow the 'mark_task_complete' rule properly.")
 
         return history
 
